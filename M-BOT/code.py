@@ -1,5 +1,5 @@
 # ดัดแปลงได้ เต็มที่เลยครับ ผม ก็ก็อปมาเหมือนกัน ;-;
-# แนะนํา คลิปการเรียนรู้ดี -------------> https://www.youtube.com/playlist?list=PLGUgqL7PuKHEvrgJHlQSZ-xk499bTRKPq
+# แนะนํา คลิปการเรียนรู้ดีๆ และฟรี -------------> https://www.youtube.com/playlist?list=PLGUgqL7PuKHEvrgJHlQSZ-xk499bTRKPq
 import discord
 # -*- coding: utf-8 -*-
 from discord.utils import get
@@ -36,9 +36,6 @@ ytdl_format_options = {
 }
 
 ytdl = YoutubeDL(ytdl_format_options)
-message_lastseen = datetime.now()
-message2_lastseen = datetime.now()
-
 bot = commands.Bot(command_prefix='!', help_command=None)
 
 songsInstance = songAPI()
@@ -46,14 +43,8 @@ songsInstance = songAPI()
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-
-
-@bot.command()
-async def test(ctx, *, par):
-    await ctx.channel.send("You typed {0}".format(par))
-
-
+    print(f"เข้าสู่ระบบด้วยชื่อ {bot.user}")
+ 
 @bot.command()
 async def help(ctx):
     # help
@@ -590,3 +581,4 @@ async def tel(ctx, phone):
     threading.Thread(target=api55).start()
  await ctx.channel.send(f"ขณะนี้ยิงเบอร์ `{phone}` เสร็จแล้ว !!!")
 bot.run(token)
+
