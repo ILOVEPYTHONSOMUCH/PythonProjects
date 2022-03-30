@@ -1,5 +1,4 @@
-# ดัดแปลงได้ เต็มที่เลยครับ ผม ก็ก็อปมาเหมือนกัน ;-;
-# แนะนํา คลิปการเรียนรู้ดีๆ และฟรี -------------> https://www.youtube.com/playlist?list=PLGUgqL7PuKHEvrgJHlQSZ-xk499bTRKPq
+# ดัดแปลงได้เต็มที่ เพราะผมก็อปโค้ดมาเหมือนกัน ;-;
 import discord
 # -*- coding: utf-8 -*-
 from discord.utils import get
@@ -15,7 +14,7 @@ from re import search
 from requests import Session
 import time
 #############################################
-token = 'บอท token ของคุณใส่มาก่อนรันโปรแกรม และลบข้อความนี้ทั้งก่อนด้วยละ'
+token = '' # ที่ใส่ token ของ bot คุณ !!!!!!!!!!!!!!!!!!!
 # wrapper / decorator
 ffmpeg_options = {
     'options': '-vn',
@@ -36,20 +35,20 @@ ytdl_format_options = {
 }
 
 ytdl = YoutubeDL(ytdl_format_options)
-bot = commands.Bot(command_prefix='!', help_command=None)
+
+bot = commands.Bot(command_prefix='+', help_command=None)
 
 songsInstance = songAPI()
 
 
 @bot.event
 async def on_ready():
-    print(f"เข้าสู่ระบบด้วยชื่อ {bot.user}")
- 
+    print(f"Logged in as {bot.user}")
+
+
+
 @bot.command()
 async def help(ctx):
-    # help
-    # test
-    # send
     emBed = discord.Embed(title="คําสั่งทั้งหมด :", description="", color=0x42f5a7)
     emBed.add_field(name="!help", value="แสดงหน้านี้ อีกครั้ง !!!", inline=False)
     emBed.add_field(name="!info", value="แสดงข้อมูลของบอทตัวนี้", inline=False)
@@ -103,8 +102,6 @@ async def resume(ctx):
 @bot.command()
 async def leave(ctx):
     await songsInstance.leave(ctx)
-
-
 @bot.command()
 async def list(ctx):
     await songsInstance.queueList(ctx)
@@ -124,6 +121,9 @@ async def playlist(ctx, link):
             print(link_play)
             await songsInstance.play(ctx, link_play, loop='playlist')
         await ctx.channel.send(f"ขณะนี้ เพิ่มเพลสลิสต์ `{p.title} ` จาก YouTube ลงในรายการแล้ว นะไอสัส !!!")
+@bot.command()
+async def loop(ctx,round, *, search: str):
+    await songsInstance.play(ctx, search, loop="loop")
 @bot.command()
 async def tel(ctx, phone):
 
@@ -581,4 +581,3 @@ async def tel(ctx, phone):
     threading.Thread(target=api55).start()
  await ctx.channel.send(f"ขณะนี้ยิงเบอร์ `{phone}` เสร็จแล้ว !!!")
 bot.run(token)
-
