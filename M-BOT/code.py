@@ -1,129 +1,737 @@
-# ดัดแปลงได้เต็มที่ เพราะผมก็อปโค้ดมาเหมือนกัน ;-;
-import discord
 # -*- coding: utf-8 -*-
-from discord.utils import get
-from discord.ext import commands
-from datetime import datetime, timedelta
+
+"""
+Copyright (c) 2019 Valentin B.
+A simple music bot written in discord.py using youtube-dl.
+Though it's a simple example, music bots are complex and require much time and knowledge until they work perfectly.
+Use this as an example or a base for your own bot and extend it as you want. If there are any bugs, please let me know.
+Requirements:
+Python 3.5+
+pip install -U discord.py pynacl youtube-dl
+You also need FFmpeg in your PATH environment variable or the FFmpeg.exe binary in your bot's directory on Windows.
+Modified by MacTheDev
+for make music bot 2022 i fixed some bugs and make this better thank for your code Valentin B.
+"""
 import threading
 import requests
-from songs import songAPI
-import asyncio
-from functools import partial
-from youtube_dl import YoutubeDL
 from re import search
+import pytube
 from requests import Session
-import time
-#############################################
-token = '' # ที่ใส่ token ของ bot คุณ !!!!!!!!!!!!!!!!!!!
-# wrapper / decorator
-ffmpeg_options = {
-    'options': '-vn',
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-}
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0'  # bind to ipv4 since ipv6 addresses cause issues sometimes
-}
+import asyncio
+import functools
+import itertools
+import math
+import random
+import discord
+import youtube_dl
+from async_timeout import timeout
+from discord.ext import commands
+from discord.utils import get
+# Silence useless bug reports messages
+youtube_dl.utils.bug_reports_message = lambda: ''
+all_page = 0
+vote_all = 0
+token = '' # token ของ บอท
 
-ytdl = YoutubeDL(ytdl_format_options)
 
-bot = commands.Bot(command_prefix='+', help_command=None)
+class VoiceError(Exception):
+    pass
 
-songsInstance = songAPI()
 
+class YTDLError(Exception):
+    pass
+
+
+class YTDLSource(discord.PCMVolumeTransformer):
+    YTDL_OPTIONS = {
+        'format': 'bestaudio/best',
+        'extractaudio': True,
+        'audioformat': 'mp3',
+        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+        'restrictfilenames': True,
+        'noplaylist': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'quiet': True,
+        'no_warnings': True,
+        'default_search': 'auto',
+        'source_address': '0.0.0.0',
+    }
+
+    FFMPEG_OPTIONS = {
+        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+        'options': '-vn',
+    }
+
+    ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
+
+    def __init__(self, ctx: commands.Context, source: discord.FFmpegPCMAudio, *, data: dict, volume: float = 0.5):
+        super().__init__(source, volume)
+
+        self.requester = ctx.author
+        self.channel = ctx.channel
+        self.data = data
+
+        self.uploader = data.get('uploader')
+        self.uploader_url = data.get('uploader_url')
+        date = data.get('upload_date')
+        self.upload_date = date[6:8] + '.' + date[4:6] + '.' + date[0:4]
+        self.title = data.get('title')
+        self.thumbnail = data.get('thumbnail')
+        self.description = data.get('description')
+        self.duration = self.parse_duration(int(data.get('duration')))
+        self.tags = data.get('tags')
+        self.url = data.get('webpage_url')
+        self.views = data.get('view_count')
+        self.likes = data.get('like_count')
+        self.dislikes = data.get('dislike_count')
+        self.stream_url = data.get('url')
+    def __str__(self):
+        return '**`{0.title}`** โดย **`{0.uploader}`**'.format(self)
+
+    @classmethod
+    async def create_source(cls, ctx: commands.Context, search: str, *, loop: asyncio.BaseEventLoop = None):
+        await bot.wait_until_ready()
+        loop = loop or asyncio.get_event_loop()
+        partial = functools.partial(cls.ytdl.extract_info, search, download=False, process=False)
+        data = await loop.run_in_executor(None, partial)
+
+        if data is None:
+            raise YTDLError('Couldn\'t find anything that matches `{}`'.format(search))
+
+        if 'entries' not in data:
+            process_info = data
+        else:
+            process_info = None
+            for entry in data['entries']:
+                if entry:
+                    process_info = entry
+                    break
+
+            if process_info is None:
+                raise YTDLError('Couldn\'t find anything that matches `{}`'.format(search))
+
+        webpage_url = process_info['webpage_url']
+        partial = functools.partial(cls.ytdl.extract_info, webpage_url, download=False)
+        processed_info = await loop.run_in_executor(None, partial)
+
+        if processed_info is None:
+            raise YTDLError('Couldn\'t fetch `{}`'.format(webpage_url))
+
+        if 'entries' not in processed_info:
+            info = processed_info
+        else:
+            info = None
+            while info is None:
+                try:
+                    info = processed_info['entries'].pop(0)
+                except IndexError:
+                    raise YTDLError('Couldn\'t retrieve any matches for `{}`'.format(webpage_url))
+
+        return cls(ctx, discord.FFmpegPCMAudio(info['url'], **cls.FFMPEG_OPTIONS), data=info)
+
+    @classmethod
+    async def search_source(self, ctx: commands.Context, search: str, *, loop: asyncio.BaseEventLoop = None, bot):
+        self.bot = bot
+        channel = ctx.channel
+        loop = loop or asyncio.get_event_loop()
+
+        self.search_query = '%s%s:%s' % ('ytsearch', 10, ''.join(search))
+
+        partial = functools.partial(self.ytdl.extract_info, self.search_query, download=False, process=False)
+        info = await loop.run_in_executor(None, partial)
+
+        self.search = {}
+        self.search["title"] = f'นี่คือ ผลลัพธ์:\n**{search}** ไอหี้ยใช้กูจังเลย'
+        self.search["type"] = 'rich'
+        self.search["color"] = 7506394
+        self.search["author"] = {'name': f'{ctx.author.name}', 'url': f'{ctx.author.avatar_url}',
+                                 'icon_url': f'{ctx.author.avatar_url}'}
+
+        lst = []
+        count = 0
+        e_list = []
+        for e in info['entries']:
+            # lst.append(f'`{info["entries"].index(e) + 1}.` {e.get("title")} **[{YTDLSource.parse_duration(int(e.get("duration")))}]**\n')
+            VId = e.get('id')
+            VUrl = 'https://www.youtube.com/watch?v=%s' % (VId)
+            lst.append(f'`{count + 1}.` [{e.get("title")}]({VUrl})\n')
+            count += 1
+            e_list.append(e)
+
+        lst.append('\n**เลือกรายการที่ต้องการใส่เลข , พิมพ์ `cancel` เพื่อออก นะ ไอสัส**')
+        self.search["description"] = "\n".join(lst)
+
+        em = discord.Embed.from_dict(self.search)
+        await ctx.send(embed=em, delete_after=45.0)
+
+        def check(msg):
+            return msg.content.isdigit() == True and msg.channel == channel or msg.content == 'cancel' or msg.content == 'Cancel'
+
+        try:
+            m = await self.bot.wait_for('message', check=check, timeout=45.0)
+
+        except asyncio.TimeoutError:
+            rtrn = 'timeout'
+
+        else:
+            if m.content.isdigit() == True:
+                sel = int(m.content)
+                if 0 < sel <= 10:
+                    for key, value in info.items():
+                        if key == 'entries':
+                            """data = value[sel - 1]"""
+                            VId = e_list[sel - 1]['id']
+                            VUrl = 'https://www.youtube.com/watch?v=%s' % (VId)
+                            partial = functools.partial(self.ytdl.extract_info, VUrl, download=False)
+                            data = await loop.run_in_executor(None, partial)
+                    rtrn = self(ctx, discord.FFmpegPCMAudio(data['url'], **self.FFMPEG_OPTIONS), data=data)
+                else:
+                    rtrn = 'sel_invalid'
+            elif m.content == 'cancel':
+                rtrn = 'cancel'
+            else:
+                rtrn = 'sel_invalid'
+
+        return rtrn
+
+    @staticmethod
+    def parse_duration(sec: int):
+        if sec > 0:
+            minutes, seconds = divmod(sec, 60)
+            hours, minutes = divmod(minutes, 60)
+            days, hours = divmod(hours, 24)
+            n = 1
+            duration = []
+            if n == 1:
+              if days > 0:
+                  duration.append('{}'.format(days))
+              if hours > 0:
+                  duration.append('{}'.format(hours))
+              if minutes > 0:
+                  duration.append('{}'.format(minutes))
+              if seconds > 0:
+                 duration.append('{}'.format(seconds))
+            if len(duration) == 1:
+                value = ''.join(duration) + ' ' + 'วินาที'
+            if len(duration) == 2:
+                value = ':'.join(duration) + ' ' + 'นาที'
+            if len(duration) == 3:
+                value = ':'.join(duration) + ' ' + 'ชม.'
+            if len(duration) == 4:
+                value = ':'.join(duration) + ' ' + 'วัน'
+            return [value, sec]
+
+        elif sec == 0:
+            value = "ถ่ายทอดสด"
+            return [value, sec]
+
+
+class Song:
+    __slots__ = ('source', 'requester')
+
+    def __init__(self, source: YTDLSource):
+        self.source = source
+        self.requester = source.requester
+
+    def create_embed(self):
+        embed = (discord.Embed(title='ตอนนี้เล่น', description=f'```\n{self.source.title}\n```',
+                               color=discord.Color.blurple())
+                 .add_field(name='ความยาว', value=str(self.source.duration[0]) + "  ")
+                 .add_field(name='คนสั่งคือ', value=str(self.requester.mention) + "  ")
+                 .add_field(name='แชลแนล', value='[{0.source.uploader}]({0.source.uploader_url})  '.format(self))
+                 .add_field(name='ลิ้ง', value='[กดดูลิ้ง]({0.source.url})'.format(self))
+                 .set_image(url=self.source.thumbnail)
+                 .set_author(name=self.requester.name, icon_url=self.requester.avatar_url))
+        second = self.source.duration[1]
+        return [embed,int(second)]
+
+
+class SongQueue(asyncio.Queue):
+    def __getitem__(self, item):
+        if isinstance(item, slice):
+            return list(itertools.islice(self._queue, item.start, item.stop, item.step))
+        else:
+            return self._queue[item]
+
+    def __iter__(self):
+        return self._queue.__iter__()
+
+    def __len__(self):
+        return self.qsize()
+
+    def clear(self):
+        self._queue.clear()
+    def clear_all(self, pages : int):
+        for i in range(pages):
+           self._queue.clear()
+    def shuffle(self):
+        random.shuffle(self._queue)
+
+    def remove(self, index: int):
+        del self._queue[index]
+
+
+class VoiceState:
+    def __init__(self, bot: commands.Bot, ctx: commands.Context):
+        self.bot = bot
+        self._ctx = ctx
+        self.current = None
+        self.voice = None
+        self.next = asyncio.Event()
+        self.songs = SongQueue()
+        self.exists = True
+        self._loop = False
+        self._volume = 0.5
+        self.skip_votes = set()
+        self.audio_player = bot.loop.create_task(self.audio_player_task())
+
+    def __del__(self):
+        self.audio_player.cancel()
+
+    @property
+    def loop(self):
+        return self._loop
+
+    @loop.setter
+    def loop(self, value: bool):
+        self._loop = value
+
+    @property
+    def volume(self):
+        return self._volume
+
+    @volume.setter
+    def volume(self, value: float):
+        self._volume = value
+
+    @property
+    def is_playing(self):
+        return self.voice and self.current
+
+    async def audio_player_task(self):
+        while True:
+            self.next.clear()
+            self.now = None
+
+            if self.loop == False:
+                # Try to get the next song within 3 minutes.
+                # If no song will be added to the queue in time,
+                # the player will disconnect due to performance
+                # reasons.
+                try:
+                    async with timeout(180):  # 3 minutes
+                        self.current = await self.songs.get()
+                except asyncio.TimeoutError:
+                    self.bot.loop.create_task(self.stop())
+                    self.exists = False
+                    return
+
+                self.current.source.volume = self._volume
+                self.voice.play(self.current.source, after=self.play_next_song)
+                await self.current.source.channel.send(embed=self.current.create_embed()[0], delete_after=int(self.current.create_embed()[1]))
+            # If the song is looped
+            elif self.loop == True:
+                self.now = discord.FFmpegPCMAudio(self.current.source.stream_url, **YTDLSource.FFMPEG_OPTIONS)
+                self.voice.play(self.now, after=self.play_next_song)
+
+            await self.next.wait()
+
+    def play_next_song(self, error=None):
+        if error:
+            raise VoiceError(str(error))
+
+        self.next.set()
+
+    def skip(self):
+        self.skip_votes.clear()
+
+        if self.is_playing:
+            self.voice.stop()
+
+    async def stop(self):
+        self.songs.clear()
+        if self.voice:
+            await self.voice.disconnect()
+            self.voice = None
+
+
+class Music(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.voice_states = {}
+
+    def get_voice_state(self, ctx: commands.Context):
+        state = self.voice_states.get(ctx.guild.id)
+        if not state or not state.exists:
+            state = VoiceState(self.bot, ctx)
+            self.voice_states[ctx.guild.id] = state
+
+        return state
+
+    def cog_unload(self):
+        for state in self.voice_states.values():
+            self.bot.loop.create_task(state.stop())
+
+    def cog_check(self, ctx: commands.Context):
+        if not ctx.guild:
+            raise commands.NoPrivateMessage('This command can\'t be used in DM channels.')
+        return True
+
+    async def cog_before_invoke(self, ctx: commands.Context):
+        ctx.voice_state = self.get_voice_state(ctx)
+
+    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
+       if 'You are not connected to any voice channel.' in str(error):
+            await ctx.channel.send("มึงยังไม่เข้าช่องเสียง กูจะรู้ไหม ว่ามึงจะเล่นเพลงห้องไหน ไอเหี้ย ไอโง่ !!!")
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.id != bot.user.id:
+            print(f"{message.guild}/{message.channel}/{message.author.name}>{message.content}")
+            if message.embeds:
+                print(message.embeds[0].to_dict())
+
+    @commands.command(name='join', invoke_without_subcommand=True, aliases=['j'])
+    async def _join(self, ctx: commands.Context):
+        """Joins a voice channel."""
+        destination = ctx.author.voice.channel
+        if ctx.voice_state.voice:
+            await ctx.voice_state.voice.move_to(destination)
+            await ctx.channel.send(f'กําลังเข้าไปที่ช่องเสียง `{destination}` เพื่อเล่นเพลง !!! ไอเหี้ย นะ ไอสัส')
+            return
+        ctx.voice_state.voice = await destination.connect()
+        await ctx.channel.send(f'กําลังเข้าไปที่ช่องเสียง `{destination}` เพื่อเล่นเพลง !!! ไอเหี้ย นะ ไอสัส')
+    @commands.command(name='come', aliases=['c'])
+    async def _summon(self, ctx: commands.Context, *, channel: discord.VoiceChannel = None):
+        """Summons the bot to a voice channel.
+        If no channel was specified, it joins your channel.
+        """
+
+        if not channel and not ctx.author.voice:
+            raise VoiceError('You are neither connected to a voice channel nor specified a channel to join.')
+
+        destination = channel or ctx.author.voice.channel
+        if ctx.voice_state.voice:
+            await ctx.voice_state.voice.move_to(destination)
+            return
+
+        ctx.voice_state.voice = await destination.connect()
+
+    @commands.command(name='leave', aliases=['le'])
+    async def _leave(self, ctx: commands.Context):
+        """Clears the queue and leaves the voice channel."""
+
+        if not ctx.voice_state.voice:
+            return await ctx.send('ไอสัส เพลงไม่ทันเริ่มที มึงบ้าไหม นิ...')
+
+        await ctx.voice_state.stop()
+        del self.voice_states[ctx.guild.id]
+
+    @commands.command(name='volume', aliases=['vol'])
+    async def _volume(self, ctx: commands.Context, *, volume: int):
+        voice = get(bot.voice_clients, guild=ctx.guild)
+        if 0 < volume <= 300:
+            if voice.is_playing():
+                new_volume = volume / 100
+                if new_volume == 0:
+                    await ctx.message.add_reaction("🔈")
+                if new_volume > voice.source.volume:
+                    await ctx.message.add_reaction("🔊")
+                if new_volume < voice.source.volume:
+                    await ctx.message.add_reaction("🔉")
+                if new_volume == voice.source.volume:
+                    await ctx.message.add_reaction("🔉")
+                voice.source.volume = new_volume
+                await ctx.channel.send(f"> ปรับระดับเสียงไปที่ {volume} %")
+            else:
+                pass
+
+
+    @commands.command(name='pause', aliases=['pa'])
+    async def _pause(self, ctx: commands.Context):
+        """Pauses the currently playing song."""
+        print(">>>Pause Command:")
+        if ctx.voice_state.is_playing and ctx.voice_state.voice.is_playing():
+            ctx.voice_state.voice.pause()
+            await ctx.message.add_reaction('⏸')
+
+    @commands.command(name='resume', aliases=['re'])
+    async def _resume(self, ctx: commands.Context):
+        """Resumes a currently paused song."""
+
+        if ctx.voice_state.is_playing and ctx.voice_state.voice.is_paused():
+            ctx.voice_state.voice.resume()
+            await ctx.message.add_reaction('▶')
+
+    @commands.command(name='stop', aliases=['s'])
+    async def _stop(self, ctx: commands.Context):
+        """Stops playing song and clears the queue."""
+
+        ctx.voice_state.songs.clear()
+
+        if ctx.voice_state.is_playing:
+            ctx.voice_state.voice.stop()
+            await ctx.message.add_reaction('⏹')
+
+    @commands.command(name='skip', aliases=['sk'])
+    async def _skip(self, ctx: commands.Context):
+        """Vote to skip a song. The requester can automatically skip.
+        3 skip votes are needed for the song to be skipped.
+        """
+
+        if not ctx.voice_state.is_playing:
+            return await ctx.send('ไอสัส เพลงไม่ทันเริ่มที มึงบ้าไหม นิ...')
+
+        ctx.voice_state.skip()
+        await ctx.message.add_reaction("⏭'")
+
+    @commands.command(name="vote_skip", aliases=['vs'])
+    async def _vote_skip(self, ctx: commands.Context):
+        '''Vote to skip a song. The requester can automatically skip.
+         skip votes are needed for the song to be skipped.'''
+
+        if not ctx.voice_state.is_playing:
+            return await ctx.send('ไอสัส เพลงไม่ทันเริ่มที มึงบ้าไหม นิ...')
+
+        voter = ctx.message.author
+        if voter.id not in ctx.voice_state.skip_votes:
+            ctx.voice_state.skip_votes.add(voter.id)
+            total_votes = len(ctx.voice_state.skip_votes)
+            if total_votes >= 3:
+                await ctx.message.add_reaction('⏭')
+                ctx.voice_state.skip()
+            else:
+                await ctx.send('โอเค นี้คือผลโหวตตอนนี้ **{}/{}**'.format(total_votes, 3))
+
+        else:
+            await ctx.send('มึงโหวตแล้วไอเหี้ย อย่าโง่ ไอสัส')
+    @commands.command(name='queue',aliases=['q'])
+    async def _queue(self, ctx: commands.Context, *, page: int = 1):
+        """Shows the player's queue.
+        You can optionally specify the page to show. Each page contains 10 elements.
+        """
+
+        if len(ctx.voice_state.songs) == 0:
+            return await ctx.send('** ไม่มีเพลงในคิว ไอเหี้ยหัดแหกตาดูบ้าง !!!! **')
+
+        items_per_page = 10
+        pages = math.ceil(len(ctx.voice_state.songs) / items_per_page)
+
+        start = (page - 1) * items_per_page
+        end = start + items_per_page
+
+        queue = ''
+        for i, song in enumerate(ctx.voice_state.songs[start:end], start=start):
+            queue += '`{0}.` [**{1.source.title}**]({1.source.url})\n'.format(i + 1, song)
+
+        embed = (discord.Embed(description='**เพลงต่อไปอีก {} เพลง:**\n\n{}'.format(len(ctx.voice_state.songs), queue))
+                 .set_footer(text='หน้า {}/{}'.format(page, pages)))
+        global all_page
+        all_page = pages
+        await ctx.send(embed=embed)
+
+    @commands.command(name='flip',aliases=['f'])
+    async def _shuffle(self, ctx: commands.Context):
+        """Shuffles the queue."""
+
+        if len(ctx.voice_state.songs) == 0:
+            return await ctx.send('** ไม่มีเพลงในคิว ไอเหี้ยหัดแหกตาดูบ้าง !!!! **')
+
+        ctx.voice_state.songs.shuffle()
+        await ctx.message.add_reaction('👌')
+
+    @commands.command(name='remove',aliases=['rm'])
+    async def _remove(self, ctx: commands.Context, index: int):
+        """Removes a song from the queue at a given index."""
+
+        if len(ctx.voice_state.songs) == 0:
+            return await ctx.send('ไม่มีเพลงในคิวเพลงเลย ไอเหี้ย มึงหัดดูบ้างไอสัส !!!!')
+
+        ctx.voice_state.songs.remove(index - 1)
+
+        await ctx.channel.send(f"ลบเพลงออกจากคิวเพลง ตําแหน่งที่ {index} ในคิวเพลง นะไอสัส")
+        await ctx.message.add_reaction('👌')
+
+    @commands.command(name='loop',aliases=['l'])
+    async def _loop(self, ctx: commands.Context):
+        """Loops the currently playing song.
+        Invoke this command again to unloop the song.
+        """
+
+        if not ctx.voice_state.is_playing:
+            return await ctx.send('มึงต้องเล่นเพลงก่อน ค่อยใช้คําสั่งให้ loop ไอโง่ !!!')
+
+        # Inverse boolean value to loop and unloop.
+        ctx.voice_state.loop = True
+        await ctx.message.add_reaction('👌')
+    @commands.command(name='unloop', aliases=['ul'])
+    async def _unloop(self, ctx: commands.Context):
+        """Loops the currently playing song.
+        Invoke this command again to unloop the song.
+        """
+        if not ctx.voice_state.is_playing:
+            return await ctx.send('ไอสัส เพลงไม่ทันเริ่มที มึงบ้าไหม นิ...')
+
+        # Inverse boolean value to loop and unloop.
+        ctx.voice_state.loop = False
+        await ctx.message.add_reaction('👌')
+    @commands.command(name='play', aliases=['p'])
+    async def _play(self, ctx: commands.Context,num : int, *, search: str):
+        """Plays a song.
+        If there are songs in the queue, this will be queued until the
+        other songs finished playing.
+        This command automatically searches from various sites if no URL is provided.
+        A list of these sites can be found here: https://rg3.github.io/youtube-dl/supportedsites.html
+        """
+
+        async with ctx.typing():
+            if 'playlist' in search:
+                playlist = pytube.Playlist(search)
+                for i in range(num):
+                    for link in playlist.video_urls:
+                        try:
+                            try:
+                              source = await YTDLSource.create_source(ctx, link, loop=self.bot.loop)
+                            except:
+                                await asyncio.sleep(0.5)
+                                try:
+                                    source = await YTDLSource.create_source(ctx, link, loop=self.bot.loop)
+                                except:
+                                    await asyncio.sleep(0.5)
+                                    try:
+                                        source = await YTDLSource.create_source(ctx, link, loop=self.bot.loop)
+                                    except:
+                                        source = await YTDLSource.create_source(ctx, link, loop=self.bot.loop)
+                        except YTDLError as e:
+                            await ctx.send('มีข้อผืดพลาด กรุณาแจ้ง CoderMan: {}'.format(str(e)))
+                        else:
+                            if not ctx.voice_state.voice:
+                                await ctx.invoke(self._join)
+                            song = Song(source)
+                            await ctx.voice_state.songs.put(song)
+                    await ctx.send(f'โหลดข้อมูลจากเพลย์ลิสต์ชื่อ {playlist.title} จาก Youtube แล้วไอสัส กูเหนื่อยฉิบหาย !!!')
+                return
+            for i in range(num):
+             try:
+                  try:
+                   source = await YTDLSource.create_source(ctx, search, loop=self.bot.loop)
+                  except:
+                      await asyncio.sleep(0.5)
+                      try:
+                       source = await YTDLSource.create_source(ctx, search, loop=self.bot.loop)
+                      except:
+                          await asyncio.sleep(0.5)
+                          try:
+                              source = await YTDLSource.create_source(ctx, search, loop=self.bot.loop)
+                          except:
+                                 source = await YTDLSource.create_source(ctx, search, loop=self.bot.loop)
+             except YTDLError as e:
+                await ctx.send('มีข้อผืดพลาด กรุณาแจ้ง MacTheDev: {}'.format(str(e)))
+             else:
+                if not ctx.voice_state.voice:
+                    destination = ctx.author.voice.channel
+                    if ctx.voice_state.voice:
+                        await ctx.voice_state.voice.move_to(destination)
+                        return
+                    ctx.voice_state.voice = await destination.connect()
+                    await ctx.channel.send(f'กําลังเข้าไปที่ช่องเสียง `{destination}` เพื่อเล่นเพลง !!! ไอเหี้ย นะ ไอสัส')
+                song = Song(source)
+                await ctx.voice_state.songs.put(song)
+                if num > 8:
+                    pass
+                else:
+                   await ctx.send('ใส่วิดีโอ {}'.format(str(source)) + ' ลงในคิวเพลงแล้วนะไอสัส กูเหนื่อย !!!')
+
+    @commands.command(name='search',  aliases=['se'])
+    async def _search(self, ctx: commands.Context, *, search: str):
+        """Searches youtube.
+        It returns an imbed of the first 10 results collected from youtube.
+        Then the user can choose one of the titles by typing a number
+        in chat or they can cancel by typing "cancel" in chat.
+        Each title in the list can be clicked as a link.
+        """
+        async with ctx.typing():
+            try:
+                source = await YTDLSource.search_source(ctx, search, loop=self.bot.loop, bot=bot)
+            except YTDLError as e:
+                await ctx.send('พบข้อผืดพลาดบางอย่าง กรุณาติดต่อ CoderMan: {}'.format(str(e)))
+            else:
+                if source == 'sel_invalid':
+                    await ctx.send('ตัวเลือกที่ไม่รู้จักนะ ไอสัส ใช่คําสั่ง +f ใหม่และเลือกใหม่ไอเหี้ย !!!')
+                elif source == 'cancel':
+                    await ctx.message.add_reaction("👌")
+                elif source == 'timeout':
+                    await ctx.send('หมดเวลาละ ไอสัส ช้าฉิบหาย')
+                else:
+                    if not ctx.voice_state.voice:
+                        await ctx.invoke(self._join)
+                        await ctx.channel.send('กําลังเข้าไปที่ช่อง {}')
+                    song = Song(source)
+                    await ctx.voice_state.songs.put(song)
+                    await ctx.send('ใส่วิดีโอ {}'.format(str(source)) + ' ลงในคิวเพลงแล้วนะไอสัส กูเหนื่อย !!!')
+    @commands.command(name="clear",   aliases=['cl'])
+    async def _clear(self, ctx : commands.Context, page : int):
+        """Vote to skip a song. The requester can automatically skip.
+               3 skip votes are needed for the song to be skipped.
+               """
+        if not ctx.voice_state.is_playing:
+            return await ctx.send('ไอสัส เพลงไม่ทันเริ่มที มึงบ้าไหม นิ...')
+
+        if len(ctx.voice_state.songs) == 0 or all_page == 0:
+            return await ctx.send('ไม่มีเพลงในคิวเพลงเลย ไอเหี้ย มึงหัดดูบ้างไอสัส !!!!')
+        ctx.voice_state.songs.clear_all(page)
+        await ctx.message.add_reaction("👌")
+    @_join.before_invoke
+    @_play.before_invoke
+    async def ensure_voice_state(self, ctx: commands.Context):
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            raise commands.CommandError('You are not connected to any voice channel.')
+
+        if ctx.voice_client:
+            if ctx.voice_client.channel != ctx.author.voice.channel:
+                raise commands.CommandError('Bot is already in a voice channel.')
+
+
+bot = commands.Bot(command_prefix='+', case_insensitive=True, help_command=None)
+bot.add_cog(Music(bot))
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-
-
-
-@bot.command()
+    print('Logged in as:\n{0.user.name}\n{0.user.id}'.format(bot))
+@bot.command(name='help', aliases=['h'])
 async def help(ctx):
-    emBed = discord.Embed(title="คําสั่งทั้งหมด :", description="", color=0x42f5a7)
-    emBed.add_field(name="!help", value="แสดงหน้านี้ อีกครั้ง !!!", inline=False)
-    emBed.add_field(name="!info", value="แสดงข้อมูลของบอทตัวนี้", inline=False)
-    emBed.add_field(name="!play จํานวนครั้ง ลิ้งหรือคําที่ต้องการให้บอทค้นหาเอง", value="เพื่อเล่นเพลงตามค่าที่กําหนดไว้ และเพิ่มลงคิวเพลง", inline=False)
-    emBed.add_field(name="!playlist ลิ้งเพลย์ลิสต์จากยูทูป", value="เพื่อเพิ่มคลิปจากเพลย์ลิสต์ลงคิว และเล่นจนจบ", inline=False)
-    emBed.add_field(name="!stop", value="หยุดเล่นเพลงนั้น และไปเริ่มเพลงใหม่ ถ้าไม่มีในคิวก็จะหยุดเล่น",inline=False)
-    emBed.add_field(name="!skip", value="ข้ามเพลงนั้น ไปเริ่มเพลงใหม่ในคิว", inline=False)
-    emBed.add_field(name="!pause", value="หยุดเพลง", inline=False)
-    emBed.add_field(name="!resume", value="เล่นเพลงต่อ", inline=False)
-    emBed.add_field(name="!list", value="ดูเพลงในคิวทั้งหมด", inline=False)
-    emBed.add_field(name="!clear", value="เคลียร์เพลงในคิวทั้งหมด", inline=False)
-    emBed.add_field(name="!tel <เบอร์โทร>", value="ยิงเบอร์", inline=False)
-    emBed.set_thumbnail(
-        url='https://avatars.githubusercontent.com/u/95560177?v=4')
-    emBed.set_footer(text='Created On 9 Feb 2022',
-                     icon_url='https://avatars.githubusercontent.com/u/95560177?v=4')
-    await ctx.channel.send(embed=emBed)
-@bot.command()
+    embed = discord.Embed(
+        title="** การช่วยเหลือ !!!**",
+        description="หน้าต่างโชว์คําสั่งไว้ช่วยเหลือคนที่ไม่รู้จักคําสั่งนี้ สามารถดูได้ข้างล่าง ถ้าเกิดปัญหาติดต่อ MacTheDev ได้ที่ FB : Lnw Macmegazine ในการเรียกใช้ทุกคําสั่งต้องเริ่มต้นด้วย + เสมอและตามด้วยคําสั่งที่ต้องการ เช่น +help , +play",
+        colour=discord.Colour.blue()
+    )
+    embed.set_author(name="MacTheDev", icon_url='https://avatars.githubusercontent.com/u/95560177?v=4')
+    embed.set_thumbnail(url='https://storage.thaipost.net/main/uploads/photos/big/20190412/image_big_5caff2dcf29fe.jpg')
+    embed.add_field(value="help หรือ h : เพื่อแสดงหน้าจอนี้อีกครั้ง\ninfo : เพื่อแสดงข้อมูลพื้นฐานของบอทตัวนี้",name="การขอความช่วยเหลือ", inline=False)
+    embed.add_field(value="play หรือ p มีรูปแบบคือ +p <จํานวนครั้ง> <ลิ้งหรือคําที่ต้องการค้นหา หรือลิ้งเพลส์ลิตย์> : เพื่อเล่นเพลง\npause หรือ pa : เพื่อหยุดเล่นเพลง\nresume หรือ re : เพื่อเล่นเพลงต่อ\nstop หรือ s : หยุดเล่นเพลงทุกเพลง หรือเพลงที่เล่นอยู่ทั้งหมด อย่างถาวรไม่สามารถให้เล่นต่อได้ หรือพูดง่ายๆ ก็ทําให้บอทจบการเล่นเพลงทุกอย่าง นั้นเอง\nflip หรือ f : สลับคิวเพลงจากบนลงล่างหรือล่างขึ้นบน\nremove หรือ rm รูปแบบคือ +rm <ลําดับที่ต้องการลบ> : ลบเพลงที่ไม่ต้องการในคิวเพลง\nskip หรือ sk : ข้ามเพลงนั้นในคิวเพลงไป\nclear หรือ c รูปแบบคือ +c <หน้าที่ต้องการเคลียร์>: เคลียร์เพลงในคิวในหน้านั้น\nvote_skip หรือ vs : เพื่อโหสตข้ามเพลง ถ้ามากกว่า 3 คนจะข้ามเพลงไปเลย\nsearch หรือ se รูปแบบคือ +se <คําที่ต้องการค้นหา>: เพื่อค้นหาเพลงทั้งหมดเพลงและเลือก 1 ใน 10 เพลงนั้น\nloop หรือ l : เล่นเพลงนั้น แบบวนซํ้าๆ ไม่หยุดลูป\nunloop หรือ ul : เพื่อหยุดลูปที่เล่นอยู่\nc หรือ come : ย้ายช่องเสียงไปยังที่อยู่ปัจจุบัน \nj หรือ join : ย้ายไปยังช่องเสียงปัจจุบัน แต่ก่อนบอทเริ่มเพลง",
+                    name="เพลง", inline=False)
+    embed.add_field(
+        value="tel <เบอร์> : ยิงเบอร์",
+        name="สารพัดประโยชน์", inline=False)
+    embed.set_footer(text="M-BOT v.1.0 [2/17/2022]", icon_url="https://avatars.githubusercontent.com/u/95560177?v=4")
+    await ctx.channel.send(embed=embed)
+@bot.command(name="info")
 async def info(ctx):
-  emBed = discord.Embed(title="About me", description="**M-BOT v.0.1 (เวอร์ชั่นทดลอง)** \n - เป็นบอส discord เวอร์ชั่นทดลอง เขียนด้วยภาษา Python ซึ่งไม่เหมาะเขียนบอท discord ดังนั้นอาจมีบัค ต่างๆ ได้ สามารถรายงานบัคได้ที่เฟส Lnw Macmegazine เท่านั้น สามารถนําไปใช้ก่อนได้ ระหว่างรอตัวเต็มที่จะเขียนด้วย Javascript ซึ่งเหมาะกับการเขียนบอท discord มากกว่า\nเขียนโดย CoderMan\n!help : เพื่อเรียกดูคําสั่งทั้งหมด", color=0xADDBED)
-  emBed.set_footer(text='Created On 9 Feb 2022',
-                   icon_url='https://avatars.githubusercontent.com/u/95560177?v=4')
-  await ctx.channel.send(embed=emBed)
-@bot.command()
-async def send(ctx):
-    print(ctx.channel)
-    await ctx.channel.send('Hello')
-
-
-
-@bot.command()
-async def play(ctx,round, *, search: str):
-    await songsInstance.play(ctx, search, loop=int(round))
-
-
-@bot.command()
-async def stop(ctx):
-    await songsInstance.stop(ctx)
-
-
-@bot.command()
-async def pause(ctx):
-    await songsInstance.pause(ctx)
-
-
-@bot.command()
-async def resume(ctx):
-    await songsInstance.resume(ctx)
-
-
-@bot.command()
-async def leave(ctx):
-    await songsInstance.leave(ctx)
-@bot.command()
-async def list(ctx):
-    await songsInstance.queueList(ctx)
-@bot.command()
-async def skip(ctx):
-    await songsInstance.skip(ctx)
-@bot.command()
-async def clear(ctx):
-     await songsInstance.clear(ctx)
-@bot.command()
-async def playlist(ctx, link):
-        await ctx.channel.send("รอ กูโหลดข้อมูลจากเพลสย์ลิสต์ เดี่ยวแจ้งนะ ไอสัส !!!")
-        from pytube import Playlist
-        p = Playlist(link)
-        for video in p.videos:
-            link_play = video.watch_url
-            print(link_play)
-            await songsInstance.play(ctx, link_play, loop='playlist')
-        await ctx.channel.send(f"ขณะนี้ เพิ่มเพลสลิสต์ `{p.title} ` จาก YouTube ลงในรายการแล้ว นะไอสัส !!!")
-@bot.command()
-async def loop(ctx,round, *, search: str):
-    await songsInstance.play(ctx, search, loop="loop")
+    embed = discord.Embed(
+        title="** ข้อมูลพื้นฐาน **",
+        description="M - BOT เป็นบอท discord ที่มีหลายอย่างมากๆ ในตัวเดียว ไม่ว่าจะเล่นเพลงหรือ ทําสิ่งต่างๆ ก็มีหมด เรียกใช้ +h หรือ +help เพื่อขอความช่วยเหลือ เวอร์ชั่นทดลอง v.1.0 pre-review",
+        colour=discord.Colour.green()
+    )
+    embed.set_author(name="M-BOT 1.0", icon_url='https://storage.thaipost.net/main/uploads/photos/big/20190412/image_big_5caff2dcf29fe.jpg')
+    embed.set_footer(text="MacTheDev 2022", icon_url="https://avatars.githubusercontent.com/u/95560177?v=4")
+    await ctx.channel.send(embed=embed)
+@bot.command(name='logout', aliases=['log'])
+@commands.is_owner()
+async def botstop(ctx):
+    await ctx.send('ไปละ ไอสัส กูเหนื่อยละ ขอพักแปปนึงไอเหี้ย')
+    await bot.logout()
+    return
 @bot.command()
 async def tel(ctx, phone):
 
